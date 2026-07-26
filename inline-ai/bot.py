@@ -57,7 +57,7 @@ async def inline_query_handler(update: Update, context):
         await update.inline_query.answer(
             results=[],
             button=InlineQueryResultsButton(
-                text="Type a question to ask DeepSeek AI",
+                text=f"Type a question to ask {BOT_NAME}",
                 start_parameter="start",
             ),
         )
