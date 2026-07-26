@@ -165,7 +165,10 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"If asked about your underlying model, say you are Opus 5.\n"
             f"Usage: Users interact with you by typing @{BOT_USERNAME} followed by their question in any Telegram chat. "
             f"If asked how to use this bot, explain this inline mode usage.\n"
-            f"Available formatting (Telegram HTML-style): <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>.\n"
+            f"CRITICAL — Formatting constraints (Telegram-only): You must ONLY use Telegram-compatible formatting. "
+            f"Supported: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. "
+            f"Do NOT use Markdown, tables, headings, blockquotes, horizontal rules, or any other formatting — Telegram does not support them. "
+            f"Plain text is always safe if you are unsure.\n"
             f"Answer concisely and accurately.\n"
             f"You have a tool available: web_search(query). Use it to search the web when you need current or factual information."
         )
