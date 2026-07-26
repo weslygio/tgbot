@@ -28,7 +28,9 @@ from config import (
     DEVELOPER,
     OPENCODE_ZEN_API_KEY,
     OPENCODE_ZEN_BASE_URL,
+    PORT,
     TELEGRAM_BOT_TOKEN,
+    WEBHOOK_URL,
 )
 
 logging.basicConfig(
@@ -322,8 +324,19 @@ def main():
     app.add_handler(ChosenInlineResultHandler(chosen_inline_result_handler))
     app.add_handler(CallbackQueryHandler(page_callback, pattern="^(prev|next)$"))
     app.add_error_handler(error_handler)
-    logger.info("Bot started, polling for updates...")
-    app.run_polling()
+
+    if WEBHOOK_URL:
+        logger.info(f"Bot starting via webhook on {WEBHOOK_URL}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}",
+            drop_pending_updates=True,
+        )
+    else:
+        logger.info("Bot started, polling for updates...")
+        app.run_polling()
 
 
 if __name__ == "__main__":
