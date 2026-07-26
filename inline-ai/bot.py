@@ -45,7 +45,6 @@ client = AsyncOpenAI(
 CHUNK_SIZE = 3800
 PENDING_TTL = 120
 
-active_tasks = {}
 pending_answers = {}
 long_responses = {}
 
@@ -75,9 +74,6 @@ async def inline_query_handler(update: Update, context):
         )
         return
 
-    if user_id in active_tasks:
-        active_tasks[user_id].cancel()
-
     result_id = f"think_{user_id}_{int(time.time() * 1000)}"
 
     entry = {
@@ -104,17 +100,6 @@ async def inline_query_handler(update: Update, context):
     ]
 
     await update.inline_query.answer(results, cache_time=0)
-
-    task = asyncio.create_task(process_and_edit(result_id, query, entry, context))
-    active_tasks[user_id] = task
-
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    finally:
-        if active_tasks.get(user_id) is task:
-            del active_tasks[user_id]
 
 
 async def process_and_edit(result_id: str, query: str, entry: dict, context):
@@ -182,6 +167,8 @@ async def chosen_inline_result_handler(update: Update, context):
     if answer:
         await edit_with_answer(context.bot, inline_message_id, entry["query"], answer)
         pending_answers.pop(result_id, None)
+    else:
+        await process_and_edit(result_id, entry["query"], entry, context)
 
 
 async def edit_with_answer(bot, inline_message_id, query, answer):
