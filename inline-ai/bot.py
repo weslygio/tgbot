@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 from exa_py import AsyncExa
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -27,11 +27,11 @@ from config import (
     ALLOWED_USER_IDS,
     BOT_NAME,
     BOT_USERNAME,
-    DEEPSEEK_MODEL,
     DEVELOPER,
     EXA_API_KEY,
-    OPENCODE_ZEN_API_KEY,
-    OPENCODE_ZEN_BASE_URL,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
     PORT,
     TELEGRAM_BOT_TOKEN,
     WEBHOOK_URL,
@@ -44,8 +44,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 client = AsyncOpenAI(
-    base_url=OPENCODE_ZEN_BASE_URL,
-    api_key=OPENCODE_ZEN_API_KEY,
+    base_url=OPENAI_BASE_URL or None,
+    api_key=OPENAI_API_KEY,
 )
 
 exa = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
@@ -180,9 +180,9 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"Current datetime: {now}\n"
             f"Context: You are responding in a Telegram chat via inline mode.\n"
             f"User: {entry['display_name']} ({entry['username']}, ID: {entry['user_id']})\n"
-            f"Identity: You are {BOT_NAME} (@{BOT_USERNAME}), a helpful AI assistant powered by DeepSeek V4 Flash Free via OpenCode Zen. "
+            f"Identity: You are {BOT_NAME} (@{BOT_USERNAME}), a helpful AI assistant. "
             f"Do not identify as Gemini, Claude, ChatGPT, or any other AI model. "
-            f"If asked about your underlying model, say you are Opus 5.\n"
+            f"If asked about your underlying model, say it is a free model chosen by the developer.\n"
             f"Usage: Users interact with you by typing @{BOT_USERNAME} followed by their question in any Telegram chat. "
             f"If asked how to use this bot, explain this inline mode usage.\n"
             f"CRITICAL — Formatting constraints (Telegram-only): You must ONLY use Telegram-compatible formatting. "
@@ -199,7 +199,7 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
         ]
 
         kwargs = {
-            "model": DEEPSEEK_MODEL,
+            "model": OPENAI_MODEL,
             "messages": messages,
             "tools": [WEB_SEARCH_TOOL],
             "tool_choice": "auto",
@@ -253,8 +253,11 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
     except asyncio.CancelledError:
         pending_answers.pop(result_id, None)
         return
+    except RateLimitError as e:
+        logger.error(f"Rate limit error: {e}")
+        answer = f"{BOT_NAME} is currently unavailable."
     except Exception as e:
-        logger.error(f"DeepSeek API error: {e}")
+        logger.error(f"AI API error: {e}")
         answer = None
 
     if not answer:
@@ -292,7 +295,7 @@ async def chosen_inline_result_handler(update: Update, context):
 
 async def edit_with_answer(bot, inline_message_id, query, answer):
     answer = sanitize_html(answer)
-    prefix = f"Question: {query}\n\nAnswer: "
+    prefix = f"<b>Question:</b> {query}\n\n<b>Answer:</b> "
     avail = CHUNK_SIZE - len(prefix)
 
     if len(answer) <= avail:

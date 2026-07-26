@@ -18,11 +18,9 @@ ALLOWED_GROUP_IDS = [
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-OPENCODE_ZEN_API_KEY = os.getenv("OPENCODE_ZEN_API_KEY", "")
-OPENCODE_ZEN_BASE_URL = os.getenv(
-    "OPENCODE_ZEN_BASE_URL", "https://opencode.ai/zen/v1"
-)
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash-free")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "")
 BOT_NAME = os.getenv("BOT_NAME", "Your Bot Name")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot_username")
 DEVELOPER = os.getenv("DEVELOPER", "@your_handle")
