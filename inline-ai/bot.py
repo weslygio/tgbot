@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 import time
 
@@ -48,6 +49,25 @@ client = AsyncOpenAI(
 )
 
 exa = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
+
+ALLOWED_TAGS = {
+    "b", "strong", "i", "em", "u", "s", "strike", "del",
+    "code", "pre", "a", "span",
+}
+
+
+def sanitize_html(text: str) -> str:
+    allowed = ALLOWED_TAGS
+    def _replacer(m: re.Match) -> str:
+        raw = m.group(0)
+        tag = m.group(1).lower()
+        if tag in allowed:
+            if tag == "span" and 'tg-spoiler' not in raw:
+                return ""
+            return raw
+        return ""
+
+    return re.sub(r"</?([a-zA-Z0-9]+)(\s[^>]*)?>", _replacer, text)
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -185,9 +205,13 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             "tool_choice": "auto",
         }
 
+        MAX_TOOL_TURNS = 2
+        tool_turns = 0
+
         response = await client.chat.completions.create(**kwargs)
 
-        while response.choices[0].finish_reason == "tool_calls":
+        while response.choices[0].finish_reason == "tool_calls" and tool_turns < MAX_TOOL_TURNS:
+            tool_turns += 1
             msg = response.choices[0].message
             messages.append(msg)
 
@@ -236,6 +260,7 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
     if not answer:
         answer = "The AI returned an empty response."
 
+    answer = sanitize_html(answer)
     entry["answer"] = answer
 
     inline_msg_id = entry.get("inline_message_id")
@@ -266,6 +291,7 @@ async def chosen_inline_result_handler(update: Update, context):
 
 
 async def edit_with_answer(bot, inline_message_id, query, answer):
+    answer = sanitize_html(answer)
     prefix = f"Question: {query}\n\nAnswer: "
     avail = CHUNK_SIZE - len(prefix)
 
