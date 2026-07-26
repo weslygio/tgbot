@@ -43,10 +43,30 @@ client = AsyncOpenAI(
 )
 
 CHUNK_SIZE = 3800
+PAGE_INDICATOR_OVERHEAD = 20
 PENDING_TTL = 120
 
 pending_answers = {}
 long_responses = {}
+
+
+def find_good_break(text, target, lookback=200):
+    if len(text) <= target:
+        return len(text)
+
+    search_end = min(target + lookback, len(text))
+    lower_bound = max(0, target - lookback)
+
+    for sep, offset in [('\n\n', 0), ('\n', 1), ('. ', 2), ('! ', 2), ('? ', 2)]:
+        idx = text.rfind(sep, 0, search_end)
+        if idx >= lower_bound:
+            return idx + offset
+
+    idx = text.rfind(' ', 0, search_end)
+    if idx >= lower_bound:
+        return idx + 1
+
+    return target
 
 
 async def inline_query_handler(update: Update, context):
@@ -182,23 +202,49 @@ async def edit_with_answer(bot, inline_message_id, query, answer):
         )
         return
 
-    chunk = answer[:avail]
+    first_max = CHUNK_SIZE - len(prefix) - PAGE_INDICATOR_OVERHEAD
+    rest_max = CHUNK_SIZE - PAGE_INDICATOR_OVERHEAD
+
+    chunks = []
+    remaining = answer.strip()
+
+    cut = find_good_break(remaining, first_max)
+    chunks.append(remaining[:cut].strip())
+    remaining = remaining[cut:].strip()
+
+    while remaining:
+        if len(remaining) <= rest_max:
+            chunks.append(remaining)
+            break
+        cut = find_good_break(remaining, rest_max)
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+
     long_responses[inline_message_id] = {
-        "full_text": answer,
-        "offset": avail,
+        "prefix": prefix,
+        "chunks": chunks,
+        "current": 0,
         "ts": time.time(),
     }
 
+    total = len(chunks)
+    text = prefix + chunks[0]
+    if total > 1:
+        text += f"\n\n\u2014 Page 1/{total} \u2014"
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton(text="Next Page", callback_data="next")]
+        ])
+    else:
+        reply_markup = None
+
     await bot.edit_message_text(
         inline_message_id=inline_message_id,
-        text=prefix + chunk + "\n\n- more below -",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(text="Continue", callback_data="cont")]
-        ]),
+        text=text,
+        reply_markup=reply_markup,
     )
 
 
-async def continue_callback(update: Update, context):
+async def page_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
 
@@ -208,29 +254,38 @@ async def continue_callback(update: Update, context):
 
     entry = long_responses.get(inline_msg_id)
     if not entry:
+        await query.edit_message_text(
+            text=f"This answer is no longer available. Please type @{BOT_USERNAME} to ask again."
+        )
         return
 
-    offset = entry["offset"]
-    remaining = entry["full_text"][offset:]
+    data = query.data
+    if data == "next":
+        entry["current"] += 1
+    elif data == "prev":
+        entry["current"] -= 1
 
-    if not remaining:
-        long_responses.pop(inline_msg_id, None)
-        return
+    page = entry["current"]
+    chunks = entry["chunks"]
+    total = len(chunks)
 
-    chunk = remaining[:CHUNK_SIZE]
-    entry["offset"] = offset + len(chunk)
-
-    remaining_after = entry["full_text"][entry["offset"]:]
-    reply_markup = None
-    if remaining_after:
-        reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(text="Continue", callback_data="cont")]
-        ])
+    if page == 0:
+        text = entry["prefix"] + chunks[0]
     else:
-        long_responses.pop(inline_msg_id, None)
+        text = chunks[page]
+
+    row = []
+    if total > 1:
+        text += f"\n\n\u2014 Page {page + 1}/{total} \u2014"
+        if page > 0:
+            row.append(InlineKeyboardButton("Previous Page", callback_data="prev"))
+        if page < total - 1:
+            row.append(InlineKeyboardButton("Next Page", callback_data="next"))
+
+    reply_markup = InlineKeyboardMarkup([row]) if row else None
 
     await query.edit_message_text(
-        text=chunk,
+        text=text,
         reply_markup=reply_markup,
     )
 
@@ -265,7 +320,7 @@ def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(ChosenInlineResultHandler(chosen_inline_result_handler))
-    app.add_handler(CallbackQueryHandler(continue_callback, pattern="^cont$"))
+    app.add_handler(CallbackQueryHandler(page_callback, pattern="^(prev|next)$"))
     app.add_error_handler(error_handler)
     logger.info("Bot started, polling for updates...")
     app.run_polling()
