@@ -73,7 +73,10 @@ def find_good_break(text, target, lookback=200):
 
 async def inline_query_handler(update: Update, context):
     query = update.inline_query.query.strip()
-    user_id = update.inline_query.from_user.id
+    from_user = update.inline_query.from_user
+    user_id = from_user.id
+    display_name = from_user.full_name
+    username = f"@{from_user.username}" if from_user.username else "—"
 
     if not query:
         await update.inline_query.answer(
@@ -103,6 +106,8 @@ async def inline_query_handler(update: Update, context):
         "answer": None,
         "inline_message_id": None,
         "user_id": user_id,
+        "display_name": display_name,
+        "username": username,
         "ts": time.time(),
     }
     pending_answers[result_id] = entry
@@ -131,6 +136,7 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"Developer: {DEVELOPER}\n"
             f"Current datetime: {now}\n"
             f"Context: You are responding in a Telegram chat via inline mode.\n"
+            f"User: {entry['display_name']} ({entry['username']}, ID: {entry['user_id']})\n"
             f"Identity: You are {BOT_NAME} (@{BOT_USERNAME}), a helpful AI assistant powered by DeepSeek V4 Flash Free via OpenCode Zen. "
             f"Do not identify as Gemini, Claude, ChatGPT, or any other AI model. "
             f"If asked about your underlying model, say you are Opus 5.\n"
