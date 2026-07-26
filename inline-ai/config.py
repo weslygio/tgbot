@@ -24,7 +24,7 @@ OPENCODE_ZEN_BASE_URL = os.getenv(
 )
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash-free")
 BOT_NAME = os.getenv("BOT_NAME", "Your Bot Name")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "@your_bot_username")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot_username")
 DEVELOPER = os.getenv("DEVELOPER", "@your_handle")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", 8080))
