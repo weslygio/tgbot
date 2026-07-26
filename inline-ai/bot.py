@@ -166,8 +166,7 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"Usage: Users interact with you by typing @{BOT_USERNAME} followed by their question in any Telegram chat. "
             f"If asked how to use this bot, explain this inline mode usage.\n"
             f"Available formatting (Telegram HTML-style): <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>.\n"
-            f"Rules: Do NOT use any Markdown or HTML formatting unless the user explicitly asks for it. "
-            f"Answer concisely and accurately in plain text.\n"
+            f"Answer concisely and accurately.\n"
             f"You have a tool available: web_search(query). Use it to search the web when you need current or factual information."
         )
 
@@ -271,6 +270,7 @@ async def edit_with_answer(bot, inline_message_id, query, answer):
         await bot.edit_message_text(
             inline_message_id=inline_message_id,
             text=prefix + answer,
+            parse_mode="HTML",
         )
         return
 
@@ -312,6 +312,7 @@ async def edit_with_answer(bot, inline_message_id, query, answer):
     await bot.edit_message_text(
         inline_message_id=inline_message_id,
         text=text,
+        parse_mode="HTML",
         reply_markup=reply_markup,
     )
 
@@ -327,7 +328,8 @@ async def page_callback(update: Update, context):
     entry = long_responses.get(inline_msg_id)
     if not entry:
         await query.edit_message_text(
-            text=f"This answer is no longer available. Please type @{BOT_USERNAME} to ask again."
+            text=f"This answer is no longer available. Please type @{BOT_USERNAME} to ask again.",
+            parse_mode="HTML",
         )
         return
 
@@ -358,6 +360,7 @@ async def page_callback(update: Update, context):
 
     await query.edit_message_text(
         text=text,
+        parse_mode="HTML",
         reply_markup=reply_markup,
     )
 
