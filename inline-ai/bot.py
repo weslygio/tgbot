@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 from datetime import datetime
 import time
 
+from exa_py import AsyncExa
 from openai import AsyncOpenAI
 from telegram import (
     InlineKeyboardButton,
@@ -26,6 +28,7 @@ from config import (
     BOT_USERNAME,
     DEEPSEEK_MODEL,
     DEVELOPER,
+    EXA_API_KEY,
     OPENCODE_ZEN_API_KEY,
     OPENCODE_ZEN_BASE_URL,
     PORT,
@@ -43,6 +46,26 @@ client = AsyncOpenAI(
     base_url=OPENCODE_ZEN_BASE_URL,
     api_key=OPENCODE_ZEN_API_KEY,
 )
+
+exa = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
+
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Search the web for current or recent information. Use this when you need up-to-date facts, news, or anything you're uncertain about.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query"
+                }
+            },
+            "required": ["query"]
+        }
+    }
+}
 
 CHUNK_SIZE = 3800
 PAGE_INDICATOR_OVERHEAD = 20
@@ -144,22 +167,63 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"If asked how to use this bot, explain this inline mode usage.\n"
             f"Available formatting (Telegram HTML-style): <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>.\n"
             f"Rules: Do NOT use any Markdown or HTML formatting unless the user explicitly asks for it. "
-            f"Answer concisely and accurately in plain text."
+            f"Answer concisely and accurately in plain text.\n"
+            f"You have a tool available: web_search(query). Use it to search the web when you need current or factual information."
         )
-        response = await client.chat.completions.create(
-            model=DEEPSEEK_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query},
-            ],
-            temperature=0.7,
-        )
-        message = response.choices[0].message
-        answer = message.content
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query},
+        ]
+
+        kwargs = {
+            "model": DEEPSEEK_MODEL,
+            "messages": messages,
+            "tools": [WEB_SEARCH_TOOL],
+            "tool_choice": "auto",
+        }
+
+        response = await client.chat.completions.create(**kwargs)
+
+        while response.choices[0].finish_reason == "tool_calls":
+            msg = response.choices[0].message
+            messages.append(msg)
+
+            for tc in msg.tool_calls:
+                if tc.function.name == "web_search":
+                    args = json.loads(tc.function.arguments)
+                    search_query = args["query"]
+
+                    if exa:
+                        search_results = await exa.search(
+                            search_query,
+                            num_results=5,
+                            contents={"text": True},
+                        )
+                        snippets = []
+                        for r in search_results.results:
+                            title = getattr(r, "title", "Untitled")
+                            snippets.append(
+                                f"Title: {title}\nURL: {r.url}\n{r.text[:1500]}"
+                            )
+                        tool_content = "\n\n---\n\n".join(snippets)
+                    else:
+                        tool_content = "Web search is not available (no API key configured)."
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_content,
+                    })
+
+            response = await client.chat.completions.create(**kwargs)
+
+        answer = response.choices[0].message.content
         if not answer:
-            answer = getattr(message, "reasoning_content", None)
+            answer = getattr(response.choices[0].message, "reasoning_content", None)
         if answer:
             answer = answer.strip()
+
     except asyncio.CancelledError:
         pending_answers.pop(result_id, None)
         return
