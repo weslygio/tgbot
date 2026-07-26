@@ -298,7 +298,7 @@ async def error_handler(update: Update, context):
 
 
 async def post_init(app):
-    app.create_task(stale_cleaner())
+    asyncio.create_task(stale_cleaner())
 
 
 async def stale_cleaner():
