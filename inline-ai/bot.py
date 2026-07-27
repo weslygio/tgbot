@@ -448,35 +448,36 @@ async def health_handler(request):
 
 
 async def setup_custom_webhook(app):
-    async def webhook_handler(request):
-        update = Update.de_json(await request.json(), app.bot)
-        await app.process_update(update)
-        return web.Response(status=200)
+    async with app:
+        async def webhook_handler(request):
+            update = Update.de_json(await request.json(), app.bot)
+            await app.process_update(update)
+            return web.Response(status=200)
 
-    await app.bot.set_webhook(
-        url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}",
-        drop_pending_updates=True,
-    )
+        await app.bot.set_webhook(
+            url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}",
+            drop_pending_updates=True,
+        )
 
-    web_app = web.Application()
-    web_app.router.add_get("/health", health_handler)
-    web_app.router.add_post(f"/{TELEGRAM_BOT_TOKEN}", webhook_handler)
+        web_app = web.Application()
+        web_app.router.add_get("/health", health_handler)
+        web_app.router.add_post(f"/{TELEGRAM_BOT_TOKEN}", webhook_handler)
 
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
 
-    logger.info(f"Custom webhook server running on {WEBHOOK_URL}")
+        logger.info(f"Custom webhook server running on {WEBHOOK_URL}")
 
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await runner.cleanup()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await runner.cleanup()
 
 
 def main():
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).post_init(post_init).build()
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(ChosenInlineResultHandler(chosen_inline_result_handler))
     app.add_handler(CallbackQueryHandler(page_callback, pattern="^(prev|next)$"))
