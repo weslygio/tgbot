@@ -449,6 +449,8 @@ async def health_handler(request):
 
 async def setup_custom_webhook(app):
     async with app:
+        await app.start()
+
         async def webhook_handler(request):
             update = Update.de_json(await request.json(), app.bot)
             await app.process_update(update)
@@ -474,6 +476,7 @@ async def setup_custom_webhook(app):
             await asyncio.Event().wait()
         finally:
             await runner.cleanup()
+            await app.stop()
 
 
 def main():
