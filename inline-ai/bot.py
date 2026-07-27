@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 import time
 
+from aiohttp import web
 from exa_py import AsyncExa
 from openai import AsyncOpenAI, RateLimitError
 from telegram import (
@@ -142,9 +143,11 @@ async def inline_query_handler(update: Update, context):
         )
         return
 
-    result_id = f"think_{user_id}_{int(time.time() * 1000)}"
+    ts = int(time.time() * 1000)
+    result_id_quick = f"quick_{user_id}_{ts}"
+    result_id_deep = f"deep_{user_id}_{ts}"
 
-    entry = {
+    entry_base = {
         "query": query,
         "answer": None,
         "inline_message_id": None,
@@ -153,12 +156,13 @@ async def inline_query_handler(update: Update, context):
         "username": username,
         "ts": time.time(),
     }
-    pending_answers[result_id] = entry
+    pending_answers[result_id_quick] = {**entry_base}
+    pending_answers[result_id_deep] = {**entry_base}
 
     results = [
         InlineQueryResultArticle(
-            id=result_id,
-            title=BOT_NAME,
+            id=result_id_quick,
+            title="Answer quickly",
             description=query[:100],
             input_message_content=InputTextMessageContent(
                 f"{BOT_NAME} - {query}\n\nThinking..."
@@ -166,7 +170,18 @@ async def inline_query_handler(update: Update, context):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(text="Processing...", callback_data="think")]
             ]),
-        )
+        ),
+        InlineQueryResultArticle(
+            id=result_id_deep,
+            title="Think before answer",
+            description=query[:100],
+            input_message_content=InputTextMessageContent(
+                f"{BOT_NAME} - {query}\n\nThinking..."
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(text="Processing...", callback_data="think")]
+            ]),
+        ),
     ]
 
     await update.inline_query.answer(results, cache_time=0)
@@ -174,6 +189,10 @@ async def inline_query_handler(update: Update, context):
 
 async def process_and_edit(result_id: str, query: str, entry: dict, context):
     try:
+        parts = result_id.split("_")
+        mode = parts[0] if parts and parts[0] in ("quick", "deep") else "quick"
+        max_tool_turns = 1 if mode == "quick" else 3
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
         system_prompt = (
             f"Developer: {DEVELOPER}\n"
@@ -189,7 +208,9 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"Supported: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. "
             f"Do NOT use Markdown, tables, headings, blockquotes, horizontal rules, or any other formatting — Telegram does not support them. "
             f"Plain text is always safe if you are unsure.\n"
-            f"Answer concisely and accurately.\n"
+            f"You must provide a real answer — never give a placeholder or generic response. "
+            f"If you do not know the answer, say so honestly. "
+            f"Do not ask follow-up questions — this is a single-turn interaction, not a continuous conversation.\n"
             f"You have a tool available: web_search(query). Use it to search the web when you need current or factual information."
         )
 
@@ -205,12 +226,11 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             "tool_choice": "auto",
         }
 
-        MAX_TOOL_TURNS = 2
         tool_turns = 0
 
         response = await client.chat.completions.create(**kwargs)
 
-        while response.choices[0].finish_reason == "tool_calls" and tool_turns < MAX_TOOL_TURNS:
+        while response.choices[0].finish_reason == "tool_calls" and tool_turns < max_tool_turns:
             tool_turns += 1
             msg = response.choices[0].message
             messages.append(msg)
@@ -423,6 +443,38 @@ async def stale_cleaner():
             long_responses.pop(imid, None)
 
 
+async def health_handler(request):
+    return web.json_response({"status": "ok"})
+
+
+async def setup_custom_webhook(app):
+    async def webhook_handler(request):
+        update = Update.de_json(await request.json(), app.bot)
+        await app.process_update(update)
+        return web.Response(status=200)
+
+    await app.bot.set_webhook(
+        url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}",
+        drop_pending_updates=True,
+    )
+
+    web_app = web.Application()
+    web_app.router.add_get("/health", health_handler)
+    web_app.router.add_post(f"/{TELEGRAM_BOT_TOKEN}", webhook_handler)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logger.info(f"Custom webhook server running on {WEBHOOK_URL}")
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
+
+
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(InlineQueryHandler(inline_query_handler))
@@ -431,14 +483,8 @@ def main():
     app.add_error_handler(error_handler)
 
     if WEBHOOK_URL:
-        logger.info(f"Bot starting via webhook on {WEBHOOK_URL}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TELEGRAM_BOT_TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}",
-            drop_pending_updates=True,
-        )
+        logger.info(f"Bot starting via custom webhook on {WEBHOOK_URL}")
+        app.run(main=setup_custom_webhook)
     else:
         logger.info("Bot started, polling for updates...")
         app.run_polling()
