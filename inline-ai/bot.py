@@ -78,7 +78,10 @@ class _Sanitizer(HTMLParser):
                 return
         parts = [tag]
         for name, val in attrs:
-            parts.append(f'{name}="{val}"' if val else name)
+            if val:
+                parts.append(f'{name}="{html.escape(val, quote=True)}"')
+            else:
+                parts.append(name)
         self._result.append("<" + " ".join(parts) + ">")
         self._tag_stack.append(tag)
 
@@ -88,7 +91,7 @@ class _Sanitizer(HTMLParser):
             self._tag_stack.pop()
 
     def handle_data(self, data):
-        self._result.append(data)
+        self._result.append(html.escape(data))
 
     def handle_entityref(self, name):
         self._result.append(f"&{name};")
