@@ -3,11 +3,12 @@ import json
 import logging
 import re
 from datetime import datetime
+import html
 import time
 
 from aiohttp import web
 from exa_py import AsyncExa
-from openai import AsyncOpenAI, RateLimitError
+from openai import AsyncOpenAI, RateLimitError, APITimeoutError, APIConnectionError
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -48,6 +49,8 @@ logger = logging.getLogger(__name__)
 client = AsyncOpenAI(
     base_url=OPENAI_BASE_URL or None,
     api_key=OPENAI_API_KEY,
+    timeout=180.0,
+    max_retries=1,
 )
 
 exa = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
@@ -335,6 +338,7 @@ async def inline_query_handler(update: Update, context):
 
 
 async def process_and_edit(result_id: str, query: str, entry: dict, context):
+    answer = None
     try:
         parts = result_id.split("_")
         mode = parts[0] if parts and parts[0] in ("quick", "deep") else "quick"
@@ -405,11 +409,11 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             tool_turns += 1
             msg = response.choices[0].message
             if msg.tool_calls:
-                entry = {"role": "assistant", "content": None, "tool_calls": msg.tool_calls}
+                tool_entry = {"role": "assistant", "content": None, "tool_calls": msg.tool_calls}
                 rc = getattr(msg, "reasoning_content", None)
                 if rc:
-                    entry["reasoning_content"] = rc
-                messages.append(entry)
+                    tool_entry["reasoning_content"] = rc
+                messages.append(tool_entry)
             else:
                 messages.append(msg)
 
@@ -478,25 +482,28 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             answer = answer.strip()
 
     except asyncio.CancelledError:
-        pending_answers.pop(result_id, None)
-        return
+        logger.warning(f"Request cancelled: {result_id}")
+    except (APITimeoutError, APIConnectionError) as e:
+        logger.error(f"AI API error: {e}")
     except RateLimitError as e:
         logger.error(f"Rate limit error: {e}")
-        answer = f"{BOT_NAME} is currently unavailable."
     except Exception as e:
         logger.error(f"AI API error: {e}")
-        answer = None
 
     if not answer:
-        answer = "The AI returned an empty response."
+        answer = f"{BOT_NAME} is currently unavailable. Please try again."
 
     answer = sanitize_html(answer)
     entry["answer"] = answer
 
     inline_msg_id = entry.get("inline_message_id")
     if inline_msg_id:
-        await edit_with_answer(context.bot, inline_msg_id, query, answer)
-        pending_answers.pop(result_id, None)
+        try:
+            await edit_with_answer(context.bot, inline_msg_id, query, answer)
+        except Exception as e:
+            logger.error(f"Failed to edit message: {e}")
+        finally:
+            pending_answers.pop(result_id, None)
 
 
 async def chosen_inline_result_handler(update: Update, context):
@@ -517,12 +524,11 @@ async def chosen_inline_result_handler(update: Update, context):
         await edit_with_answer(context.bot, inline_message_id, entry["query"], answer)
         pending_answers.pop(result_id, None)
     else:
-        await process_and_edit(result_id, entry["query"], entry, context)
+        asyncio.create_task(process_and_edit(result_id, entry["query"], entry, context))
 
 
 async def edit_with_answer(bot, inline_message_id, query, answer):
-    answer = sanitize_html(answer)
-    prefix = f"<b>Question:</b> {query}\n\n<b>Answer:</b> "
+    prefix = f"<b>Question:</b> {html.escape(query)}\n\n<b>Answer:</b> "
     avail = CHUNK_SIZE - len(prefix)
 
     if len(answer) <= avail:
@@ -624,6 +630,10 @@ async def page_callback(update: Update, context):
     )
 
 
+async def think_callback(update: Update, context):
+    await update.callback_query.answer()
+
+
 async def error_handler(update: Update, context):
     update_id = update.update_id if update else "N/A"
     logger.error(f"Error handling update {update_id}: {context.error}")
@@ -638,7 +648,9 @@ async def stale_cleaner():
         await asyncio.sleep(30)
         now = time.time()
         stale_answers = [
-            rid for rid, e in pending_answers.items() if now - e["ts"] > PENDING_TTL
+            rid for rid, e in pending_answers.items()
+            if now - e["ts"] > PENDING_TTL
+            and not (e.get("inline_message_id") and e["answer"] is None)
         ]
         for rid in stale_answers:
             pending_answers.pop(rid, None)
@@ -660,7 +672,7 @@ async def setup_custom_webhook(app):
 
         async def webhook_handler(request):
             update = Update.de_json(await request.json(), app.bot)
-            await app.process_update(update)
+            asyncio.create_task(app.process_update(update))
             return web.Response(status=200)
 
         await app.bot.set_webhook(
@@ -691,6 +703,7 @@ def main():
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(ChosenInlineResultHandler(chosen_inline_result_handler))
     app.add_handler(CallbackQueryHandler(page_callback, pattern="^(prev|next)$"))
+    app.add_handler(CallbackQueryHandler(think_callback, pattern="^think$"))
     app.add_error_handler(error_handler)
 
     if WEBHOOK_URL:
