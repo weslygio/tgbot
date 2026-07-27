@@ -34,6 +34,7 @@ from config import (
     OPENAI_BASE_URL,
     OPENAI_MODEL,
     PORT,
+    REASONING_EFFORT,
     TELEGRAM_BOT_TOKEN,
     WEBHOOK_URL,
 )
@@ -393,6 +394,8 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             "messages": messages,
             "tools": TOOLS_LIST,
             "tool_choice": "auto",
+            "reasoning_effort": REASONING_EFFORT,
+            "extra_body": {"thinking": {"type": "enabled"}},
         }
 
         response = await client.chat.completions.create(**kwargs)
