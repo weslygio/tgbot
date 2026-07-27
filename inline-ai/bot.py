@@ -74,7 +74,7 @@ WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web for current or recent information. Use this when you need up-to-date facts, news, or anything you're uncertain about.",
+        "description": "Search the web for current or recent information. Use when you need up-to-date facts, news, or anything you're uncertain about.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -87,6 +87,142 @@ WEB_SEARCH_TOOL = {
         }
     }
 }
+
+CALCULATE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "calculate",
+        "description": "Evaluate a mathematical expression. Supports +, -, *, /, **, %, //, parentheses, integers, floats, and built-in functions: abs, round, min, max, pow, sum, int, float.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "The mathematical expression to evaluate (e.g. '2 + 2 * 3', '(15 + 5) / 4', 'abs(-10)')"
+                }
+            },
+            "required": ["expression"]
+        }
+    }
+}
+
+STRING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_string_operation",
+        "description": "Perform a string operation. Operations: length, upper, lower, title, capitalize, strip, replace, split, join, find, count, reverse, slice, concat.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["length", "upper", "lower", "title", "capitalize", "strip", "replace", "split", "join", "find", "count", "reverse", "slice", "concat"],
+                    "description": "The string operation to perform"
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The input string to operate on"
+                },
+                "arg1": {
+                    "type": "string",
+                    "description": "Optional first argument: substring to find, separator, old text (for replace), start index (for slice), or string to concat"
+                },
+                "arg2": {
+                    "type": "string",
+                    "description": "Optional second argument: new text (for replace) or end index (for slice)"
+                }
+            },
+            "required": ["operation", "text"]
+        }
+    }
+}
+
+import ast
+import operator as op_mod
+
+
+def safe_eval(expression: str) -> str:
+    allowed_ops = {
+        ast.Add: op_mod.add, ast.Sub: op_mod.sub, ast.Mult: op_mod.mul,
+        ast.Div: op_mod.truediv, ast.Pow: op_mod.pow, ast.Mod: op_mod.mod,
+        ast.USub: op_mod.neg, ast.UAdd: op_mod.pos, ast.FloorDiv: op_mod.floordiv,
+    }
+    allowed_funcs = {
+        "abs": abs, "round": round, "min": min, "max": max,
+        "pow": pow, "sum": sum, "int": int, "float": float,
+    }
+
+    tree = ast.parse(expression, mode="eval")
+
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.BinOp):
+            if type(node.op) not in allowed_ops:
+                raise ValueError("Operator not allowed")
+            return allowed_ops[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp):
+            if type(node.op) not in allowed_ops:
+                raise ValueError("Operator not allowed")
+            return allowed_ops[type(node.op)](_eval(node.operand))
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)):
+                return node.value
+            raise ValueError("Unsupported constant")
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in allowed_funcs:
+                raise ValueError("Function not allowed")
+            return allowed_funcs[node.func.id](*[_eval(a) for a in node.args])
+        if isinstance(node, ast.List):
+            return [_eval(el) for el in node.elts]
+        raise ValueError("Expression type not supported")
+
+    result = _eval(tree)
+    if isinstance(result, float):
+        return f"{result:.10g}"
+    return str(result)
+
+
+def run_string_operation(operation: str, text: str, arg1: str = "", arg2: str = "") -> str:
+    if operation == "length":
+        return str(len(text))
+    if operation == "upper":
+        return text.upper()
+    if operation == "lower":
+        return text.lower()
+    if operation == "title":
+        return text.title()
+    if operation == "capitalize":
+        return text.capitalize()
+    if operation == "strip":
+        return text.strip()
+    if operation == "replace":
+        return text.replace(arg1, arg2)
+    if operation == "split":
+        return str(text.split(arg1) if arg1 else text.split())
+    if operation == "join":
+        sep = arg1 or " "
+        items = [x.strip() for x in text.split(",") if x.strip()]
+        return sep.join(items)
+    if operation == "find":
+        return str(text.find(arg1))
+    if operation == "count":
+        return str(text.count(arg1))
+    if operation == "reverse":
+        return text[::-1]
+    if operation == "slice":
+        try:
+            start = int(arg1) if arg1 else 0
+            end = int(arg2) if arg2 else len(text)
+            return text[start:end]
+        except ValueError:
+            return "Error: slice indices must be integers"
+    if operation == "concat":
+        return text + arg1
+    return f"Error: unknown operation '{operation}'"
+
+
+TOOLS_LIST = [WEB_SEARCH_TOOL, CALCULATE_TOOL, STRING_TOOL]
 
 CHUNK_SIZE = 3800
 PAGE_INDICATOR_OVERHEAD = 20
@@ -194,7 +330,7 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
         max_tool_turns = 1 if mode == "quick" else 3
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-        system_prompt = (
+        BASE_SYSTEM = (
             f"Developer: {DEVELOPER}\n"
             f"Current datetime: {now}\n"
             f"Context: You are responding in a Telegram chat via inline mode.\n"
@@ -211,22 +347,43 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"You must provide a real answer — never give a placeholder or generic response. "
             f"If you do not know the answer, say so honestly. "
             f"Do not ask follow-up questions — this is a single-turn interaction, not a continuous conversation.\n"
-            f"You have a tool available: web_search(query). Use it to search the web when you need current or factual information."
         )
 
+        tools_desc = "\n".join(
+            f"- {t['function']['name']}: {t['function']['description']}"
+            for t in TOOLS_LIST
+        )
+
+        tool_turns = 0
+
+        def make_prompt(turn_num: int) -> str:
+            p = (
+                BASE_SYSTEM
+                + f"You have {max_tool_turns} tool call turn(s) to use the following tools:\n"
+                f"{tools_desc}\n"
+                f"Current turn: {turn_num + 1} of {max_tool_turns}.\n"
+            )
+            if turn_num + 1 >= max_tool_turns:
+                p += (
+                    "CRITICAL — This is your FINAL turn. You MUST provide a complete, "
+                    "direct answer in this response. Do NOT use any tools or say you "
+                    "will search later — answer now with what you already know."
+                )
+            else:
+                p += "You may use tools if needed, but save enough turns for a final answer."
+            return p
+
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": make_prompt(0)},
             {"role": "user", "content": query},
         ]
 
         kwargs = {
             "model": OPENAI_MODEL,
             "messages": messages,
-            "tools": [WEB_SEARCH_TOOL],
+            "tools": TOOLS_LIST,
             "tool_choice": "auto",
         }
-
-        tool_turns = 0
 
         response = await client.chat.completions.create(**kwargs)
 
@@ -236,10 +393,11 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             messages.append(msg)
 
             for tc in msg.tool_calls:
-                if tc.function.name == "web_search":
-                    args = json.loads(tc.function.arguments)
-                    search_query = args["query"]
+                args = json.loads(tc.function.arguments)
+                name = tc.function.name
 
+                if name == "web_search":
+                    search_query = args["query"]
                     if exa:
                         search_results = await exa.search(
                             search_query,
@@ -256,11 +414,39 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
                     else:
                         tool_content = "Web search is not available (no API key configured)."
 
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_content,
-                    })
+                elif name == "calculate":
+                    try:
+                        tool_content = safe_eval(args["expression"])
+                    except Exception as e:
+                        tool_content = f"Error: {e}"
+
+                elif name == "run_string_operation":
+                    try:
+                        tool_content = run_string_operation(
+                            args["operation"],
+                            args.get("text", ""),
+                            args.get("arg1", ""),
+                            args.get("arg2", ""),
+                        )
+                    except Exception as e:
+                        tool_content = f"Error: {e}"
+
+                else:
+                    tool_content = f"Error: unknown tool '{name}'"
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_content,
+                })
+
+            messages[0] = {"role": "system", "content": make_prompt(tool_turns)}
+            kwargs["messages"] = messages
+
+            if tool_turns + 1 >= max_tool_turns:
+                kwargs["tool_choice"] = "none"
+            else:
+                kwargs["tool_choice"] = "auto"
 
             response = await client.chat.completions.create(**kwargs)
 
