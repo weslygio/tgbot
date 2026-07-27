@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from datetime import datetime
+from html.parser import HTMLParser
 import html
 import time
 
@@ -61,6 +62,49 @@ ALLOWED_TAGS = {
 }
 
 
+class _Sanitizer(HTMLParser):
+    def __init__(self, allowed_tags: set):
+        super().__init__(convert_charrefs=False)
+        self._allowed = allowed_tags
+        self._result = []
+        self._tag_stack = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in self._allowed:
+            return
+        if tag == "span":
+            classes = dict(attrs).get("class", "")
+            if "tg-spoiler" not in classes:
+                return
+        parts = [tag]
+        for name, val in attrs:
+            parts.append(f'{name}="{val}"' if val else name)
+        self._result.append("<" + " ".join(parts) + ">")
+        self._tag_stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if self._tag_stack and self._tag_stack[-1] == tag:
+            self._result.append(f"</{tag}>")
+            self._tag_stack.pop()
+
+    def handle_data(self, data):
+        self._result.append(data)
+
+    def handle_entityref(self, name):
+        self._result.append(f"&{name};")
+
+    def handle_charref(self, name):
+        self._result.append(f"&#{name};")
+
+    def close(self):
+        for tag in reversed(self._tag_stack):
+            self._result.append(f"</{tag}>")
+        super().close()
+
+    def get_result(self) -> str:
+        return "".join(self._result)
+
+
 def sanitize_html(text: str) -> str:
     text = re.sub(
         r'<[｜\|]\s*[dD][sS][mM][lL]\s*[｜\|][^>]*>', '', text
@@ -72,17 +116,10 @@ def sanitize_html(text: str) -> str:
         r'[｜\|]+\s*[dD][sS][mM][lL]\s*[｜\|]+', '', text
     )
 
-    allowed = ALLOWED_TAGS
-    def _replacer(m: re.Match) -> str:
-        raw = m.group(0)
-        tag = m.group(1).lower()
-        if tag in allowed:
-            if tag == "span" and 'tg-spoiler' not in raw:
-                return ""
-            return raw
-        return ""
-
-    return re.sub(r"</?([^\s>/]+)(\s[^>]*)?>", _replacer, text)
+    parser = _Sanitizer(ALLOWED_TAGS)
+    parser.feed(text)
+    parser.close()
+    return parser.get_result()
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -502,8 +539,16 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             await edit_with_answer(context.bot, inline_msg_id, query, answer)
         except Exception as e:
             logger.error(f"Failed to edit message: {e}")
-            logger.error(f"Answer (first 500 chars): {answer[:500]}")
             logger.error(f"Query: {query}")
+            m = re.search(r"byte offset (\d+)", str(e))
+            if m:
+                offset = int(m.group(1))
+                start = max(0, offset - 80)
+                raw_bytes = answer.encode("utf-8")
+                end = min(len(raw_bytes), offset + 80)
+                snippet = raw_bytes[start:end].decode("utf-8", errors="replace")
+                logger.error(f"Context around byte {offset}: ...{snippet}...")
+            logger.debug(f"Full answer ({len(answer)} chars): {answer}")
         finally:
             pending_answers.pop(result_id, None)
 
