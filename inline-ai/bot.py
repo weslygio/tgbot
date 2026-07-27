@@ -58,6 +58,16 @@ ALLOWED_TAGS = {
 
 
 def sanitize_html(text: str) -> str:
+    text = re.sub(
+        r'<[｜\|]\s*[dD][sS][mM][lL]\s*[｜\|][^>]*>', '', text
+    )
+    text = re.sub(
+        r'</[｜\|]\s*[dD][sS][mM][lL]\s*[｜\|][^>]*>', '', text
+    )
+    text = re.sub(
+        r'[｜\|]+\s*[dD][sS][mM][lL]\s*[｜\|]+', '', text
+    )
+
     allowed = ALLOWED_TAGS
     def _replacer(m: re.Match) -> str:
         raw = m.group(0)
@@ -68,7 +78,7 @@ def sanitize_html(text: str) -> str:
             return raw
         return ""
 
-    return re.sub(r"</?([a-zA-Z0-9]+)(\s[^>]*)?>", _replacer, text)
+    return re.sub(r"</?([^\s>/]+)(\s[^>]*)?>", _replacer, text)
 
 WEB_SEARCH_TOOL = {
     "type": "function",
