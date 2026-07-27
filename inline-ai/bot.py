@@ -358,6 +358,7 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
             f"You must provide a real answer — never give a placeholder or generic response. "
             f"If you do not know the answer, say so honestly. "
             f"Do not ask follow-up questions — this is a single-turn interaction, not a continuous conversation.\n"
+            f"Do not mention search queries, URLs, or tool calls. Just provide the answer directly.\n"
         )
 
         tools_desc = "\n".join(
@@ -403,7 +404,14 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
         while response.choices[0].finish_reason == "tool_calls" and tool_turns < max_tool_turns:
             tool_turns += 1
             msg = response.choices[0].message
-            messages.append(msg)
+            if msg.tool_calls:
+                entry = {"role": "assistant", "content": None, "tool_calls": msg.tool_calls}
+                rc = getattr(msg, "reasoning_content", None)
+                if rc:
+                    entry["reasoning_content"] = rc
+                messages.append(entry)
+            else:
+                messages.append(msg)
 
             for tc in msg.tool_calls:
                 args = json.loads(tc.function.arguments)
