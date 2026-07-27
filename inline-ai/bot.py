@@ -499,7 +499,7 @@ async def process_and_edit(result_id: str, query: str, entry: dict, context):
     inline_msg_id = entry.get("inline_message_id")
     if inline_msg_id:
         try:
-            await edit_with_answer(context.bot, inline_message_id, query, answer)
+            await edit_with_answer(context.bot, inline_msg_id, query, answer)
         except Exception as e:
             logger.error(f"Failed to edit message: {e}")
             logger.error(f"Answer (first 500 chars): {answer[:500]}")
