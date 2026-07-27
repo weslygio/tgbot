@@ -484,7 +484,7 @@ def main():
 
     if WEBHOOK_URL:
         logger.info(f"Bot starting via custom webhook on {WEBHOOK_URL}")
-        app.run(main=setup_custom_webhook)
+        asyncio.run(setup_custom_webhook(app))
     else:
         logger.info("Bot started, polling for updates...")
         app.run_polling()
