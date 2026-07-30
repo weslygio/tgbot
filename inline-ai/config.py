@@ -21,9 +21,15 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_MODEL_ID = os.getenv("OPENROUTER_MODEL_ID", "")
+OPENROUTER_FALLBACK_MODEL_ID = os.getenv("OPENROUTER_FALLBACK_MODEL_ID", "")
 INPUT_MODALITIES = {
     x.strip().lower()
     for x in os.getenv("OPENROUTER_MODEL_INPUT_MODALITY", "").split(",")
+    if x.strip().lower() in {"text", "file", "audio", "image", "video"}
+}
+FALLBACK_INPUT_MODALITIES = {
+    x.strip().lower()
+    for x in os.getenv("OPENROUTER_FALLBACK_MODEL_INPUT_MODALITY", "").split(",")
     if x.strip().lower() in {"text", "file", "audio", "image", "video"}
 }
 BOT_NAME = os.getenv("BOT_NAME", "Your Bot Name")

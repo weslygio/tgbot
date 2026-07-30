@@ -41,9 +41,11 @@ from config import (
     BOT_USERNAME,
     DEVELOPER,
     EXA_API_KEY,
+    FALLBACK_INPUT_MODALITIES,
     INPUT_MODALITIES,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
+    OPENROUTER_FALLBACK_MODEL_ID,
     OPENROUTER_MODEL_ID,
     PORT,
     REASONING_EFFORT,
@@ -708,8 +710,16 @@ async def process_ai_query(
             messages.extend(history_messages)
         messages.append({"role": "user", "content": user_content})
 
-        response = await openrouter_request(
-            model=OPENROUTER_MODEL_ID,
+        async def _req(**kw):
+            try:
+                return await openrouter_request(model=OPENROUTER_MODEL_ID, **kw)
+            except Exception:
+                if not OPENROUTER_FALLBACK_MODEL_ID:
+                    raise
+                logger.warning("Primary model failed, trying fallback")
+                return await openrouter_request(model=OPENROUTER_FALLBACK_MODEL_ID, **kw)
+
+        response = await _req(
             messages=messages,
             tools=TOOLS_LIST,
             tool_choice="auto",
@@ -781,8 +791,7 @@ async def process_ai_query(
 
             choice = "none" if tool_turns + 1 >= max_tool_turns else "auto"
 
-            response = await openrouter_request(
-                model=OPENROUTER_MODEL_ID,
+            response = await _req(
                 messages=messages,
                 tools=TOOLS_LIST,
                 tool_choice=choice,
