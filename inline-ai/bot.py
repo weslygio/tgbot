@@ -459,6 +459,11 @@ AUDIO_FORMAT_MAP = {
 }
 
 
+def _modality_of_part(part: dict) -> str | None:
+    t = part.get("type")
+    return {"image_url": "image", "input_audio": "audio", "video_url": "video", "file": "file"}.get(t)
+
+
 async def make_content_parts(message, bot) -> list[dict]:
     parts = []
     modality, file_id = guess_media_type(message)
@@ -717,6 +722,15 @@ async def process_ai_query(
                 if not OPENROUTER_FALLBACK_MODEL_ID:
                     raise
                 logger.warning("Primary model failed, trying fallback")
+                if FALLBACK_INPUT_MODALITIES and isinstance(kw["messages"][-1]["content"], list):
+                    filtered = [
+                        p for p in kw["messages"][-1]["content"]
+                        if p.get("type") == "text" or _modality_of_part(p) in FALLBACK_INPUT_MODALITIES
+                    ]
+                    if len(filtered) == 1:
+                        kw["messages"][-1]["content"] = filtered[0]["text"]
+                    else:
+                        kw["messages"][-1]["content"] = filtered
                 return await openrouter_request(model=OPENROUTER_FALLBACK_MODEL_ID, **kw)
 
         response = await _req(
