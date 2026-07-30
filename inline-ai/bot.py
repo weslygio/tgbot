@@ -327,47 +327,54 @@ def split_answer(text: str, max_len: int) -> list[str]:
     return chunks
 
 
-def extract_reply_context(message) -> dict | None:
-    if not message.reply_to_message:
-        return None
-    reply = message.reply_to_message
-    sender = reply.from_user
-    sender_name = sender.full_name if sender else "Unknown"
-    sender_username = f"@{sender.username}" if sender and sender.username else "\u2014"
+def extract_reply_chain(message, max_depth=5) -> list[dict] | None:
+    """Walk up the reply_to_message chain and return context for each level."""
+    entries = []
+    current = message.reply_to_message
+    depth = 0
+    while current and depth < max_depth:
+        sender = current.from_user
+        if not sender:
+            current = current.reply_to_message
+            depth += 1
+            continue
+        sender_name = sender.full_name
+        sender_username = f"@{sender.username}" if sender.username else "\u2014"
+        text = current.text or current.caption or ""
+        media_type = None
+        if current.photo:
+            media_type = "a photo"
+        elif current.document:
+            media_type = f"a document ({current.document.mime_type or 'unknown type'})"
+        elif current.video:
+            media_type = "a video"
+        elif current.audio:
+            media_type = "an audio file"
+        elif current.voice:
+            media_type = "a voice message"
+        elif current.sticker:
+            media_type = "a sticker"
+        elif current.animation:
+            media_type = "an animation (GIF)"
 
-    text = reply.text or reply.caption or ""
-    media_type = None
-    if reply.photo:
-        media_type = "a photo"
-    elif reply.document:
-        media_type = f"a document ({reply.document.mime_type or 'unknown type'})"
-    elif reply.video:
-        media_type = "a video"
-    elif reply.audio:
-        media_type = "an audio file"
-    elif reply.voice:
-        media_type = "a voice message"
-    elif reply.sticker:
-        media_type = "a sticker"
-    elif reply.animation:
-        media_type = "an animation (GIF)"
+        if not text and media_type:
+            text = f"[{media_type}]"
+        elif text and media_type:
+            text = f"[{media_type}] {text}"
+        if len(text) > 2000:
+            text = text[:2000] + "..."
 
-    if not text and media_type:
-        text = f"[{media_type}]"
-    elif text and media_type:
-        text = f"[{media_type}] {text}"
+        entries.append({
+            "sender_name": sender_name,
+            "sender_username": sender_username,
+            "text": text,
+            "media_type": media_type,
+            "_message": current,
+        })
+        current = current.reply_to_message
+        depth += 1
 
-    if len(text) > 2000:
-        text = text[:2000] + "..."
-
-    return {
-        "sender_name": sender_name,
-        "sender_username": sender_username,
-        "text": text,
-        "media_type": media_type,
-        "thread_id": message.message_thread_id,
-        "_message": reply,
-    }
+    return entries if entries else None
 
 
 MIME_MAP = {
@@ -656,7 +663,7 @@ async def process_ai_query(
     query: str,
     entry: dict,
     mode: str = "quick",
-    reply_context: dict | None = None,
+    reply_context: list[dict] | None = None,
     media_parts: list[dict] | None = None,
     history_messages: list[dict] | None = None,
 ) -> str:
@@ -668,15 +675,14 @@ async def process_ai_query(
 
         reply_section = ""
         if reply_context:
-            reply_section = (
-                f"\nThe user is replying to a message from {reply_context['sender_name']} "
-                f"({reply_context['sender_username']}):\n"
-                f"---\n"
-                f"{html.escape(reply_context['text'])}\n"
-                f"---\n"
-            )
-            if reply_context.get("thread_id"):
-                reply_section += f"Thread topic ID: {reply_context['thread_id']}.\n"
+            lines = ["\nConversation chain (most recent first):"]
+            for ctx in reply_context:
+                lines.append(
+                    f"- {ctx['sender_name']} ({ctx['sender_username']}): "
+                    f"{html.escape(ctx['text'])}"
+                )
+            lines.append("---")
+            reply_section = "\n".join(lines) + "\n"
 
         BASE_SYSTEM = (
             f"Developer: {DEVELOPER}\n"
@@ -922,7 +928,7 @@ async def _dm_respond(
     query: str,
     mode: str,
     media_parts: list[dict] | None,
-    reply_context: dict | None,
+    reply_context: list[dict] | None,
 ):
     user_id = message.from_user.id
     logger.info(f"[dm] user={user_id} query='{query[:100]}' mode={mode} media_parts_count={len(media_parts or [])} reply={bool(reply_context)}")
@@ -996,12 +1002,14 @@ async def handle_message(update: Update, context):
         logger.warning(f"Unauthorized DM from user {message.from_user.id}")
         return
 
-    reply_context = extract_reply_context(message)
+    reply_context = extract_reply_chain(message)
     media_parts = await make_content_parts(message, context.bot)
-    if reply_context and reply_context.get("_message"):
-        reply_media = await make_content_parts(reply_context["_message"], context.bot)
-        logger.info(f"[handle_message] reply_media_count={len(reply_media)}")
-        media_parts = reply_media + media_parts
+    if reply_context:
+        for ctx in reply_context:
+            reply_media = await make_content_parts(ctx["_message"], context.bot)
+            if reply_media:
+                logger.info(f"[handle_message] reply_media_count={len(reply_media)}")
+                media_parts = reply_media + media_parts
 
     await _dm_respond(message, context, query, "deep", media_parts, reply_context)
 
@@ -1033,12 +1041,14 @@ async def ask_command(update: Update, context):
 
     mode = "quick" if "fast" in command else "deep"
 
-    reply_context = extract_reply_context(message)
+    reply_context = extract_reply_chain(message)
     media_parts = await make_content_parts(message, context.bot)
-    if reply_context and reply_context.get("_message"):
-        reply_media = await make_content_parts(reply_context["_message"], context.bot)
-        logger.info(f"[ask_command] reply_media_count={len(reply_media)}")
-        media_parts = reply_media + media_parts
+    if reply_context:
+        for ctx in reply_context:
+            reply_media = await make_content_parts(ctx["_message"], context.bot)
+            if reply_media:
+                logger.info(f"[ask_command] reply_media_count={len(reply_media)}")
+                media_parts = reply_media + media_parts
 
     if message.chat.type == Chat.PRIVATE:
         await message.reply_text(
