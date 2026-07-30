@@ -6,17 +6,16 @@ import io
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from html.parser import HTMLParser
 import html
 from pathlib import Path
-import time
 
 import aiohttp
 from aiohttp import web
 from exa_py import AsyncExa
 from telegram import (
-    Chat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
@@ -30,8 +29,6 @@ from telegram.ext import (
     ChosenInlineResultHandler,
     CommandHandler,
     InlineQueryHandler,
-    MessageHandler,
-    filters,
 )
 
 from config import (
@@ -286,11 +283,8 @@ TOOLS_LIST = [WEB_SEARCH_TOOL, CALCULATE_TOOL, STRING_TOOL]
 CHUNK_SIZE = 3800
 PAGE_INDICATOR_OVERHEAD = 20
 PENDING_TTL = 120
-SESSION_TTL = 8 * 60 * 60
-
 pending_answers = {}
 long_responses = {}
-sessions: dict[int, dict] = {}
 
 
 def find_good_break(text, target, lookback=200):
@@ -327,54 +321,43 @@ def split_answer(text: str, max_len: int) -> list[str]:
     return chunks
 
 
-def extract_reply_chain(message, max_depth=5) -> list[dict] | None:
-    """Walk up the reply_to_message chain and return context for each level."""
-    entries = []
-    current = message.reply_to_message
-    depth = 0
-    while current and depth < max_depth:
-        sender = current.from_user
-        if not sender:
-            current = current.reply_to_message
-            depth += 1
-            continue
-        sender_name = sender.full_name
-        sender_username = f"@{sender.username}" if sender.username else "\u2014"
-        text = current.text or current.caption or ""
-        media_type = None
-        if current.photo:
-            media_type = "a photo"
-        elif current.document:
-            media_type = f"a document ({current.document.mime_type or 'unknown type'})"
-        elif current.video:
-            media_type = "a video"
-        elif current.audio:
-            media_type = "an audio file"
-        elif current.voice:
-            media_type = "a voice message"
-        elif current.sticker:
-            media_type = "a sticker"
-        elif current.animation:
-            media_type = "an animation (GIF)"
+def extract_reply_context(message) -> dict | None:
+    reply = message.reply_to_message
+    if not reply:
+        return None
+    sender = reply.from_user
+    sender_name = sender.full_name if sender else "Unknown"
+    sender_username = f"@{sender.username}" if sender and sender.username else "\u2014"
+    text = reply.text or reply.caption or ""
+    media_type = None
+    if reply.photo:
+        media_type = "a photo"
+    elif reply.document:
+        media_type = f"a document ({reply.document.mime_type or 'unknown type'})"
+    elif reply.video:
+        media_type = "a video"
+    elif reply.audio:
+        media_type = "an audio file"
+    elif reply.voice:
+        media_type = "a voice message"
+    elif reply.sticker:
+        media_type = "a sticker"
+    elif reply.animation:
+        media_type = "an animation (GIF)"
 
-        if not text and media_type:
-            text = f"[{media_type}]"
-        elif text and media_type:
-            text = f"[{media_type}] {text}"
-        if len(text) > 2000:
-            text = text[:2000] + "..."
+    if not text and media_type:
+        text = f"[{media_type}]"
+    elif text and media_type:
+        text = f"[{media_type}] {text}"
+    if len(text) > 2000:
+        text = text[:2000] + "..."
 
-        entries.append({
-            "sender_name": sender_name,
-            "sender_username": sender_username,
-            "text": text,
-            "media_type": media_type,
-            "_message": current,
-        })
-        current = current.reply_to_message
-        depth += 1
-
-    return entries if entries else None
+    return {
+        "sender_name": sender_name,
+        "sender_username": sender_username,
+        "text": text,
+        "_message": reply,
+    }
 
 
 MIME_MAP = {
@@ -663,9 +646,8 @@ async def process_ai_query(
     query: str,
     entry: dict,
     mode: str = "quick",
-    reply_context: list[dict] | None = None,
+    reply_context: dict | None = None,
     media_parts: list[dict] | None = None,
-    history_messages: list[dict] | None = None,
 ) -> str:
     answer = None
     try:
@@ -675,14 +657,13 @@ async def process_ai_query(
 
         reply_section = ""
         if reply_context:
-            lines = ["\nConversation chain (most recent first):"]
-            for ctx in reply_context:
-                lines.append(
-                    f"- {ctx['sender_name']} ({ctx['sender_username']}): "
-                    f"{html.escape(ctx['text'])}"
-                )
-            lines.append("---")
-            reply_section = "\n".join(lines) + "\n"
+            reply_section = (
+                f"\nThe user is replying to {reply_context['sender_name']} "
+                f"({reply_context['sender_username']}):\n"
+                f"---\n"
+                f"{html.escape(reply_context['text'])}\n"
+                f"---\n"
+            )
 
         BASE_SYSTEM = (
             f"Developer: {DEVELOPER}\n"
@@ -735,10 +716,7 @@ async def process_ai_query(
         if media_parts:
             user_content = [{"type": "text", "text": query or "Analyze this media."}] + media_parts
         logger.info(f"[ai] mode={mode} has_media_parts={has_media_parts} media_count={len(media_parts or [])} user_content_type={'list' if has_media_parts else 'str'} query='{query[:100]}'")
-        messages = [{"role": "system", "content": make_prompt(0)}]
-        if history_messages:
-            messages.extend(history_messages)
-        messages.append({"role": "user", "content": user_content})
+        messages = [{"role": "system", "content": make_prompt(0)}, {"role": "user", "content": user_content}]
 
         async def _req(**kw):
             try:
@@ -922,96 +900,7 @@ async def chosen_inline_result_handler(update: Update, context):
         asyncio.create_task(process_and_edit(result_id, entry["query"], entry, context))
 
 
-async def _dm_respond(
-    message,
-    context,
-    query: str,
-    mode: str,
-    media_parts: list[dict] | None,
-    reply_context: list[dict] | None,
-):
-    user_id = message.from_user.id
-    logger.info(f"[dm] user={user_id} query='{query[:100]}' mode={mode} media_parts_count={len(media_parts or [])} reply={bool(reply_context)}")
-    display_name = message.from_user.full_name
-    username = f"@{message.from_user.username}" if message.from_user.username else "\u2014"
 
-    entry = {
-        "user_id": user_id,
-        "display_name": display_name,
-        "username": username,
-    }
-
-    session = sessions.get(user_id)
-    if session:
-        if time.time() - session["last_activity"] > SESSION_TTL:
-            session["messages"] = []
-        history = session["messages"]
-    else:
-        session = {"messages": [], "last_activity": time.time()}
-        sessions[user_id] = session
-        history = None
-
-    thinking = await message.reply_text(
-        f"<b>{BOT_NAME}</b> is thinking\u2026",
-        parse_mode="HTML",
-    )
-
-    answer = await process_ai_query(
-        query,
-        entry,
-        mode=mode,
-        reply_context=reply_context,
-        media_parts=media_parts or None,
-        history_messages=history,
-    )
-
-    session["messages"].append({"role": "user", "content": query})
-    session["messages"].append({"role": "assistant", "content": answer})
-    session["last_activity"] = time.time()
-
-    chunks = split_answer(answer, CHUNK_SIZE - 100)
-    first = True
-    for chunk in chunks:
-        if first:
-            await thinking.edit_text(text=chunk, parse_mode="HTML")
-            first = False
-        else:
-            await message.reply_text(text=chunk, parse_mode="HTML")
-
-
-async def handle_message(update: Update, context):
-    message = update.message
-    if not message or message.chat.type != Chat.PRIVATE:
-        return
-
-    query = (message.text or message.caption or "").strip()
-    logger.info(f"[handle_message] from={message.from_user.id} query='{query[:100]}' has_photo={bool(message.photo)} has_video={bool(message.video)} has_audio={bool(message.audio)} has_doc={bool(message.document)}")
-    if not query:
-        logger.info(f"[handle_message] no text/caption, dropping")
-        return
-
-    has_disallowed_media = any([
-        message.document, message.voice, message.animation,
-        message.video_note, message.sticker,
-    ])
-    if has_disallowed_media:
-        logger.info(f"[handle_message] disallowed media present, dropping")
-        return
-
-    if message.from_user.id not in ALLOWED_USER_IDS:
-        logger.warning(f"Unauthorized DM from user {message.from_user.id}")
-        return
-
-    reply_context = extract_reply_chain(message)
-    media_parts = await make_content_parts(message, context.bot)
-    if reply_context:
-        for ctx in reply_context:
-            reply_media = await make_content_parts(ctx["_message"], context.bot)
-            if reply_media:
-                logger.info(f"[handle_message] reply_media_count={len(reply_media)}")
-                media_parts = reply_media + media_parts
-
-    await _dm_respond(message, context, query, "deep", media_parts, reply_context)
 
 
 async def ask_command(update: Update, context):
@@ -1041,20 +930,11 @@ async def ask_command(update: Update, context):
 
     mode = "quick" if "fast" in command else "deep"
 
-    reply_context = extract_reply_chain(message)
+    reply_context = extract_reply_context(message)
     media_parts = await make_content_parts(message, context.bot)
-    if reply_context:
-        for ctx in reply_context:
-            reply_media = await make_content_parts(ctx["_message"], context.bot)
-            if reply_media:
-                logger.info(f"[ask_command] reply_media_count={len(reply_media)}")
-                media_parts = reply_media + media_parts
-
-    if message.chat.type == Chat.PRIVATE:
-        await message.reply_text(
-            "Just send your message directly in this chat, or use /refresh_session."
-        )
-        return
+    if reply_context and reply_context["_message"]:
+        reply_media = await make_content_parts(reply_context["_message"], context.bot)
+        media_parts = reply_media + media_parts
 
     display_name = message.from_user.full_name
     username = f"@{message.from_user.username}" if message.from_user.username else "\u2014"
@@ -1088,14 +968,6 @@ async def ask_command(update: Update, context):
             await thinking.edit_text(text=truncated, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Failed to edit answer message: {e}")
-
-
-async def refresh_session(update: Update, context):
-    if update.message.chat.type != Chat.PRIVATE:
-        await update.message.reply_text("This command only works in private chat.")
-        return
-    sessions.pop(update.message.from_user.id, None)
-    await update.message.reply_text("Session cleared. Start a new conversation.")
 
 
 async def edit_with_answer(bot, inline_message_id, query, answer):
@@ -1275,12 +1147,7 @@ def main():
     app.add_handler(ChosenInlineResultHandler(chosen_inline_result_handler))
     app.add_handler(CallbackQueryHandler(page_callback, pattern="^(prev|next)$"))
     app.add_handler(CallbackQueryHandler(think_callback, pattern="^think$"))
-    app.add_handler(MessageHandler(
-        ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_message,
-    ))
     app.add_handler(CommandHandler(["ask_fast", "ask_think"], ask_command))
-    app.add_handler(CommandHandler("refresh_session", refresh_session))
     app.add_error_handler(error_handler)
 
     if WEBHOOK_URL:
