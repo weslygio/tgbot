@@ -671,7 +671,7 @@ async def process_ai_query(
             f"If asked about your underlying model, say it is a free model chosen by the developer.\n"
             f"Usage: Users interact with you by typing @{BOT_USERNAME} followed by their question in any Telegram chat. "
             f"If asked how to use this bot, explain this inline mode usage.\n"
-            f"Your input modalities: {', '.join(sorted(INPUT_MODALITIES)) if INPUT_MODALITIES else 'text'}.\n"
+            f"Your input modalities (the user may include these media types): {', '.join(sorted(INPUT_MODALITIES)) if INPUT_MODALITIES else 'text'}.\n"
             f"CRITICAL \u2014 Formatting constraints (Telegram-only): You must ONLY use Telegram-compatible formatting. "
             f"Supported: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. "
             f"Do NOT use Markdown, tables, headings, blockquotes, horizontal rules, or any other formatting \u2014 Telegram does not support them. "
@@ -736,8 +736,8 @@ async def process_ai_query(
                 if sys_msg["role"] == "system":
                     modalities_str = ", ".join(sorted(fallback_modalities))
                     sys_msg["content"] = re.sub(
-                        r"Your input modalities: [^\n]+",
-                        f"Your input modalities: {modalities_str}.",
+                        r"Your input modalities [^\n]+",
+                        f"Your input modalities (the user may include these media types): {modalities_str}.",
                         sys_msg["content"],
                     )
                 return await openrouter_request(model=OPENROUTER_FALLBACK_MODEL_ID, **kw)
