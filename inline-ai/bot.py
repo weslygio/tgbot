@@ -722,15 +722,24 @@ async def process_ai_query(
                 if not OPENROUTER_FALLBACK_MODEL_ID:
                     raise
                 logger.warning("Primary model failed, trying fallback")
-                if FALLBACK_INPUT_MODALITIES and isinstance(kw["messages"][-1]["content"], list):
+                fallback_modalities = FALLBACK_INPUT_MODALITIES or {"text"}
+                if isinstance(kw["messages"][-1]["content"], list):
                     filtered = [
                         p for p in kw["messages"][-1]["content"]
-                        if p.get("type") == "text" or _modality_of_part(p) in FALLBACK_INPUT_MODALITIES
+                        if p.get("type") == "text" or _modality_of_part(p) in fallback_modalities
                     ]
                     if len(filtered) == 1:
                         kw["messages"][-1]["content"] = filtered[0]["text"]
                     else:
                         kw["messages"][-1]["content"] = filtered
+                sys_msg = kw["messages"][0]
+                if sys_msg["role"] == "system":
+                    modalities_str = ", ".join(sorted(fallback_modalities))
+                    sys_msg["content"] = re.sub(
+                        r"Your input modalities: [^\n]+",
+                        f"Your input modalities: {modalities_str}.",
+                        sys_msg["content"],
+                    )
                 return await openrouter_request(model=OPENROUTER_FALLBACK_MODEL_ID, **kw)
 
         response = await _req(
