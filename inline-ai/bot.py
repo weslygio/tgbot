@@ -401,8 +401,9 @@ MAX_MEDIA_SIZE = 18 * 1024 * 1024
 async def download_and_encode(bot, file_id: str) -> tuple[str, str, str] | None:
     try:
         tg_file = await bot.get_file(file_id)
+        logger.info(f"[download] file_id={file_id} size={tg_file.file_size} path={tg_file.file_path}")
         if tg_file.file_size and tg_file.file_size > MAX_MEDIA_SIZE:
-            logger.warning(f"File too large: {tg_file.file_size} bytes (max {MAX_MEDIA_SIZE})")
+            logger.warning(f"[download] File too large: {tg_file.file_size} bytes (max {MAX_MEDIA_SIZE})")
             return None
         buf = io.BytesIO()
         await tg_file.download_to_memory(buf)
@@ -411,9 +412,10 @@ async def download_and_encode(bot, file_id: str) -> tuple[str, str, str] | None:
         mime = MIME_MAP.get(ext, "application/octet-stream")
         b64 = base64.b64encode(data).decode("utf-8")
         filename = Path(tg_file.file_path or "file").name if tg_file.file_path else "file"
+        logger.info(f"[download] success file_id={file_id} mime={mime} b64_len={len(b64)} filename={filename}")
         return b64, mime, filename
     except Exception as e:
-        logger.error(f"Failed to download file {file_id}: {e}")
+        logger.error(f"[download] Failed to download file {file_id}: {e}")
         return None
 
 
@@ -467,11 +469,14 @@ def _modality_of_part(part: dict) -> str | None:
 async def make_content_parts(message, bot) -> list[dict]:
     parts = []
     modality, file_id = guess_media_type(message)
+    logger.info(f"[media] guessed modality={modality} file_id={file_id} input_modalities={INPUT_MODALITIES}")
     if not modality or modality not in INPUT_MODALITIES:
+        logger.info(f"[media] skipped — modality={modality} not in INPUT_MODALITIES={INPUT_MODALITIES}")
         return parts
 
     encoded = await download_and_encode(bot, file_id)
     if encoded is None:
+        logger.info(f"[media] download_and_encode returned None for {modality}/{file_id}")
         return parts
 
     b64, mime, filename = encoded
@@ -603,13 +608,24 @@ async def openrouter_request(
 
     url = f"{OPENROUTER_BASE_URL.rstrip('/')}/chat/completions"
 
+    last_msg = messages[-1] if messages else {}
+    last_content = last_msg.get("content", "")
+    content_is_list = isinstance(last_content, list)
+    content_types = [p.get("type") for p in last_content] if content_is_list else ["text"]
+    logger.info(f"[request] model={model} messages={len(messages)} last_content_type={'list' if content_is_list else 'str'} types={content_types} tools={bool(tools)} tool_choice={tool_choice}")
+
     for attempt in range(2):
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=180)
             ) as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    data = await resp.json()
+                    choice = data["choices"][0]
+                    finish = choice["finish_reason"]
+                    resp_text = (choice["message"].get("content") or choice["message"].get("reasoning_content") or "")[:150]
+                    logger.info(f"[response] model={model} finish={finish} text='{resp_text}'")
+                    return data
 
                 text = await resp.text()
                 error_data = {}
@@ -671,7 +687,7 @@ async def process_ai_query(
             f"If asked about your underlying model, say it is a free model chosen by the developer.\n"
             f"Usage: Users interact with you by typing @{BOT_USERNAME} followed by their question in any Telegram chat. "
             f"If asked how to use this bot, explain this inline mode usage.\n"
-            f"Your input modalities (the user may include these media types): {', '.join(sorted(INPUT_MODALITIES)) if INPUT_MODALITIES else 'text'}.\n"
+            f"The user may send you: {', '.join(sorted(INPUT_MODALITIES)) if INPUT_MODALITIES else 'text'}.\n"
             f"CRITICAL \u2014 Formatting constraints (Telegram-only): You must ONLY use Telegram-compatible formatting. "
             f"Supported: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. "
             f"Do NOT use Markdown, tables, headings, blockquotes, horizontal rules, or any other formatting \u2014 Telegram does not support them. "
@@ -708,8 +724,10 @@ async def process_ai_query(
             return p
 
         user_content = query
+        has_media_parts = bool(media_parts)
         if media_parts:
             user_content = [{"type": "text", "text": query or "Analyze this media."}] + media_parts
+        logger.info(f"[ai] mode={mode} has_media_parts={has_media_parts} media_count={len(media_parts or [])} user_content_type={'list' if has_media_parts else 'str'} query='{query[:100]}'")
         messages = [{"role": "system", "content": make_prompt(0)}]
         if history_messages:
             messages.extend(history_messages)
@@ -736,8 +754,8 @@ async def process_ai_query(
                 if sys_msg["role"] == "system":
                     modalities_str = ", ".join(sorted(fallback_modalities))
                     sys_msg["content"] = re.sub(
-                        r"Your input modalities [^\n]+",
-                        f"Your input modalities (the user may include these media types): {modalities_str}.",
+                        r"The user may send you: [^\n]+",
+                        f"The user may send you: {modalities_str}.",
                         sys_msg["content"],
                     )
                 return await openrouter_request(model=OPENROUTER_FALLBACK_MODEL_ID, **kw)
@@ -906,6 +924,7 @@ async def _dm_respond(
     reply_context: dict | None,
 ):
     user_id = message.from_user.id
+    logger.info(f"[dm] user={user_id} query='{query[:100]}' mode={mode} media_parts_count={len(media_parts or [])} reply={bool(reply_context)}")
     display_name = message.from_user.full_name
     username = f"@{message.from_user.username}" if message.from_user.username else "\u2014"
 
@@ -959,7 +978,9 @@ async def handle_message(update: Update, context):
         return
 
     query = (message.text or message.caption or "").strip()
+    logger.info(f"[handle_message] from={message.from_user.id} query='{query[:100]}' has_photo={bool(message.photo)} has_video={bool(message.video)} has_audio={bool(message.audio)} has_doc={bool(message.document)}")
     if not query:
+        logger.info(f"[handle_message] no text/caption, dropping")
         return
 
     has_disallowed_media = any([
@@ -967,6 +988,7 @@ async def handle_message(update: Update, context):
         message.video_note, message.sticker,
     ])
     if has_disallowed_media:
+        logger.info(f"[handle_message] disallowed media present, dropping")
         return
 
     if message.from_user.id not in ALLOWED_USER_IDS:
@@ -990,6 +1012,8 @@ async def ask_command(update: Update, context):
         message.audio, message.voice, message.animation,
         message.video_note, message.sticker,
     ])
+    command = message.text.split(maxsplit=1)[0].lower() if message.text else ""
+    logger.info(f"[ask_command] from={message.from_user.id} cmd={command} query='{query[:100]}' has_media={has_media} chat_type={message.chat.type}")
 
     if not query and not has_media:
         await message.reply_text(
@@ -1002,7 +1026,6 @@ async def ask_command(update: Update, context):
     if user_id not in ALLOWED_USER_IDS:
         return
 
-    command = message.text.split(maxsplit=1)[0].lower() if message.text else ""
     mode = "quick" if "fast" in command else "deep"
 
     reply_context = extract_reply_context(message)
