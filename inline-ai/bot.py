@@ -12,6 +12,7 @@ import html
 from pathlib import Path
 import time
 
+import aiohttp
 from aiohttp import web
 from exa_py import AsyncExa
 from telegram import (
