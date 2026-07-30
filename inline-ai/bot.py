@@ -366,6 +366,7 @@ def extract_reply_context(message) -> dict | None:
         "text": text,
         "media_type": media_type,
         "thread_id": message.message_thread_id,
+        "_message": reply,
     }
 
 
@@ -997,6 +998,10 @@ async def handle_message(update: Update, context):
 
     reply_context = extract_reply_context(message)
     media_parts = await make_content_parts(message, context.bot)
+    if reply_context and reply_context.get("_message"):
+        reply_media = await make_content_parts(reply_context["_message"], context.bot)
+        logger.info(f"[handle_message] reply_media_count={len(reply_media)}")
+        media_parts = reply_media + media_parts
 
     await _dm_respond(message, context, query, "deep", media_parts, reply_context)
 
@@ -1030,6 +1035,10 @@ async def ask_command(update: Update, context):
 
     reply_context = extract_reply_context(message)
     media_parts = await make_content_parts(message, context.bot)
+    if reply_context and reply_context.get("_message"):
+        reply_media = await make_content_parts(reply_context["_message"], context.bot)
+        logger.info(f"[ask_command] reply_media_count={len(reply_media)}")
+        media_parts = reply_media + media_parts
 
     if message.chat.type == Chat.PRIVATE:
         await message.reply_text(
