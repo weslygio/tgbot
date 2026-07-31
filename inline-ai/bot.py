@@ -651,7 +651,8 @@ async def process_ai_query(
 ) -> str:
     answer = None
     try:
-        max_tool_turns = 1 if mode == "quick" else 3
+        tools_enabled = mode == "deep"
+        max_tool_turns = 3 if tools_enabled else 1
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -695,27 +696,28 @@ async def process_ai_query(
         tool_turns = 0
 
         def make_prompt(turn_num: int) -> str:
-            p = (
-                BASE_SYSTEM
-                + f"You have {max_tool_turns} tool call turn(s) to use the following tools:\n"
-                f"{tools_desc}\n"
-                f"Current turn: {turn_num + 1} of {max_tool_turns}.\n"
-            )
-            if turn_num + 1 >= max_tool_turns:
+            p = BASE_SYSTEM
+            if tools_enabled:
                 p += (
-                    "CRITICAL \u2014 This is your FINAL turn. You MUST provide a complete, "
-                    "direct answer in this response. Do NOT use any tools or say you "
-                    "will search later \u2014 answer now with what you already know."
+                    f"You have {max_tool_turns} tool call turn(s) to use the following tools:\n"
+                    f"{tools_desc}\n"
+                    f"Current turn: {turn_num + 1} of {max_tool_turns}.\n"
                 )
-            else:
-                p += "You may use tools if needed, but save enough turns for a final answer."
+                if turn_num + 1 >= max_tool_turns:
+                    p += (
+                        "CRITICAL \u2014 This is your FINAL turn. You MUST provide a complete, "
+                        "direct answer in this response. Do NOT use any tools or say you "
+                        "will search later \u2014 answer now with what you already know."
+                    )
+                else:
+                    p += "You may use tools if needed, but save enough turns for a final answer."
             return p
 
         user_content = query
         has_media_parts = bool(media_parts)
         if media_parts:
             user_content = [{"type": "text", "text": query or "Analyze this media."}] + media_parts
-        logger.info(f"[ai] mode={mode} has_media_parts={has_media_parts} media_count={len(media_parts or [])} user_content_type={'list' if has_media_parts else 'str'} query='{query[:100]}'")
+        logger.info(f"[ai] mode={mode} tools={tools_enabled} has_media_parts={has_media_parts} media_count={len(media_parts or [])} user_content_type={'list' if has_media_parts else 'str'} query='{query[:100]}'")
         messages = [{"role": "system", "content": make_prompt(0)}, {"role": "user", "content": user_content}]
 
         async def _req(**kw):
@@ -747,13 +749,13 @@ async def process_ai_query(
 
         response = await _req(
             messages=messages,
-            tools=TOOLS_LIST,
-            tool_choice="auto",
+            tools=TOOLS_LIST if tools_enabled else None,
+            tool_choice="auto" if tools_enabled else None,
             reasoning_effort=REASONING_EFFORT,
             user=str(entry["user_id"]),
         )
 
-        while response["choices"][0]["finish_reason"] == "tool_calls" and tool_turns < max_tool_turns:
+        while tools_enabled and response["choices"][0]["finish_reason"] == "tool_calls" and tool_turns < max_tool_turns:
             tool_turns += 1
             msg = response["choices"][0]["message"]
             if msg.get("tool_calls"):
@@ -815,12 +817,12 @@ async def process_ai_query(
 
             messages[0] = {"role": "system", "content": make_prompt(tool_turns)}
 
-            choice = "none" if tool_turns + 1 >= max_tool_turns else "auto"
+            final_turn = tool_turns + 1 >= max_tool_turns
 
             response = await _req(
                 messages=messages,
-                tools=TOOLS_LIST,
-                tool_choice=choice,
+                tools=None if final_turn else TOOLS_LIST,
+                tool_choice=None if final_turn else "auto",
                 reasoning_effort=REASONING_EFFORT,
                 user=str(entry["user_id"]),
             )
@@ -830,6 +832,24 @@ async def process_ai_query(
             answer = response["choices"][0]["message"].get("reasoning_content")
         if answer:
             answer = answer.strip()
+
+        if not answer and tool_turns > 0:
+            logger.warning("Empty answer after tool turns; retrying once without tools")
+            messages[0] = {"role": "system", "content": BASE_SYSTEM}
+            messages.append({
+                "role": "user",
+                "content": "Your previous response was empty. Answer the user's original question directly now based on the information you have.",
+            })
+            response = await _req(
+                messages=messages,
+                tools=None,
+                tool_choice=None,
+                reasoning_effort=REASONING_EFFORT,
+                user=str(entry["user_id"]),
+            )
+            answer = response["choices"][0]["message"].get("content")
+            if answer:
+                answer = answer.strip()
 
     except asyncio.CancelledError:
         logger.warning("AI request cancelled")
@@ -918,14 +938,12 @@ async def ask_command(update: Update, context):
     logger.info(f"[ask_command] from={message.from_user.id} cmd={command} query='{query[:100]}' has_media={has_media} chat_type={message.chat.type}")
 
     if not query and not has_media:
-        await message.reply_text(
-            "Usage: /ask_fast your question here\n"
-            "       /ask_think your question here"
-        )
+        usage_cmd = "ask_fast" if "fast" in command else "ask_think"
+        await message.reply_text(f"Usage: /{usage_cmd} `query`")
         return
 
     user_id = message.from_user.id
-    if user_id not in ALLOWED_USER_IDS:
+    if message.chat.id not in ALLOWED_GROUP_IDS and user_id not in ALLOWED_USER_IDS:
         return
 
     mode = "quick" if "fast" in command else "deep"
