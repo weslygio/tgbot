@@ -939,7 +939,10 @@ async def ask_command(update: Update, context):
 
     if not query and not has_media:
         usage_cmd = "ask_fast" if "fast" in command else "ask_think"
-        await message.reply_text(f"Usage: /{usage_cmd} `query`")
+        await message.reply_text(
+            f"Usage: <code>/{usage_cmd} query</code>",
+            parse_mode="HTML",
+        )
         return
 
     user_id = message.from_user.id
