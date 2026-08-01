@@ -29,6 +29,8 @@ from telegram.ext import (
     ChosenInlineResultHandler,
     CommandHandler,
     InlineQueryHandler,
+    MessageHandler,
+    filters,
 )
 
 from config import (
@@ -616,6 +618,10 @@ async def openrouter_request(
                     finish = choice["finish_reason"]
                     resp_text = (choice["message"].get("content") or choice["message"].get("reasoning_content") or "")[:150]
                     logger.info(f"[response] model={model} finish={finish} text='{resp_text}'")
+                    if finish == "error" and attempt == 0:
+                        logger.warning(f"Model returned finish='error' (text='{resp_text}'), retrying once")
+                        await asyncio.sleep(3)
+                        continue
                     return data
 
                 text = await resp.text()
@@ -673,13 +679,16 @@ async def process_ai_query(
             f"User: {entry['display_name']} ({entry['username']}, ID: {entry['user_id']})\n"
             f"Identity: You are {BOT_NAME} (@{BOT_USERNAME}), a helpful AI assistant. "
             f"Do not identify as Gemini, Claude, ChatGPT, or any other AI model. "
-            f"If asked about your underlying model, say it is a free model chosen by the developer.\n"
+            f"If asked about your underlying model, say it is a cheap model chosen by the developer.\n"
             f"Usage: Users interact with you by typing @{BOT_USERNAME} followed by their question in any Telegram chat. "
             f"If asked how to use this bot, explain this inline mode usage.\n"
             f"The user may send you: {', '.join(sorted(INPUT_MODALITIES)) if INPUT_MODALITIES else 'text'}.\n"
-            f"CRITICAL \u2014 Formatting constraints (Telegram-only): You must ONLY use Telegram-compatible formatting. "
-            f"Supported: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. "
-            f"Do NOT use Markdown, tables, headings, blockquotes, horizontal rules, or any other formatting \u2014 Telegram does not support them. "
+            f"CRITICAL \u2014 Formatting constraints (Telegram-only): You must output plain text formatted ONLY with the official Telegram HTML tags "
+            f"that get rendered by Telegram directly: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. "
+            f"Characters like * _ # > are fine in normal text (e.g. 'a * b'), but NEVER use them for formatting: "
+            f"no **bold**, no *italic*, no * bullet points (use plain '-' or '\u2022' instead), no # headings, no > quotes, no backticks (use <code> instead). "
+            f"Telegram prints any Markdown syntax literally instead of rendering it, so it looks broken to users. "
+            f"No tables, blockquotes, or horizontal rules \u2014 Telegram does not support them. "
             f"Plain text is always safe if you are unsure.\n"
             f"You must provide a real answer \u2014 never give a placeholder or generic response. "
             f"If you do not know the answer, say so honestly. "
@@ -867,7 +876,7 @@ async def process_ai_query(
             logger.error(f"AI API error: {e}")
 
     if not answer:
-        answer = f"{BOT_NAME} is currently unavailable. Please try again."
+        answer = "Our provider is currently unavailable. Not the developer's fault. Please try again."
 
     return sanitize_html(answer)
 
@@ -934,7 +943,8 @@ async def ask_command(update: Update, context):
         message.audio, message.voice, message.animation,
         message.video_note, message.sticker,
     ])
-    command = message.text.split(maxsplit=1)[0].lower() if message.text else ""
+    message_text = message.text or message.caption or ""
+    command = message_text.split(maxsplit=1)[0].lower() if message_text else ""
     logger.info(f"[ask_command] from={message.from_user.id} cmd={command} query='{query[:100]}' has_media={has_media} chat_type={message.chat.type}")
 
     if not query and not has_media:
@@ -989,6 +999,20 @@ async def ask_command(update: Update, context):
             await thinking.edit_text(text=truncated, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Failed to edit answer message: {e}")
+
+
+CAPTION_COMMAND_RE = re.compile(r"^/(ask_fast|ask_think)(?:@\w+)?(?:[ \t]+(.*))?$", re.IGNORECASE | re.DOTALL)
+
+
+async def ask_caption_command(update: Update, context):
+    message = update.message
+    if not message or not message.caption:
+        return
+    match = CAPTION_COMMAND_RE.match(message.caption)
+    if not match:
+        return
+    context.args = match.group(2).split() if match.group(2) else []
+    await ask_command(update, context)
 
 
 async def edit_with_answer(bot, inline_message_id, query, answer):
@@ -1169,6 +1193,10 @@ def main():
     app.add_handler(CallbackQueryHandler(page_callback, pattern="^(prev|next)$"))
     app.add_handler(CallbackQueryHandler(think_callback, pattern="^think$"))
     app.add_handler(CommandHandler(["ask_fast", "ask_think"], ask_command))
+    app.add_handler(MessageHandler(
+        filters.CAPTION & filters.Regex(r"^/(ask_fast|ask_think)(?:@\w+)?"),
+        ask_caption_command,
+    ))
     app.add_error_handler(error_handler)
 
     if WEBHOOK_URL:
