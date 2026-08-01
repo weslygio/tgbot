@@ -128,6 +128,14 @@ def sanitize_html(text: str) -> str:
     parser.close()
     return parser.get_result()
 
+
+def markdown_to_html(text: str) -> str:
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(?=[^*\s])([^*\n]+?)(?<=[^*\s])\*", r"<i>\1</i>", text)
+    text = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"(?m)^[ \t]*\*[ \t]+", "- ", text)
+    return text
+
 WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
@@ -459,6 +467,16 @@ def _modality_of_part(part: dict) -> str | None:
     return {"image_url": "image", "input_audio": "audio", "video_url": "video", "file": "file"}.get(t)
 
 
+def _response_is_bad(response: dict) -> bool:
+    choice = response["choices"][0]
+    if choice["finish_reason"] == "tool_calls":
+        return False
+    if choice["finish_reason"] == "error":
+        return True
+    content = choice["message"].get("content") or choice["message"].get("reasoning_content") or ""
+    return not content.strip()
+
+
 async def make_content_parts(message, bot) -> list[dict]:
     parts = []
     modality, file_id = guess_media_type(message)
@@ -618,10 +636,6 @@ async def openrouter_request(
                     finish = choice["finish_reason"]
                     resp_text = (choice["message"].get("content") or choice["message"].get("reasoning_content") or "")[:150]
                     logger.info(f"[response] model={model} finish={finish} text='{resp_text}'")
-                    if finish == "error" and attempt == 0:
-                        logger.warning(f"Model returned finish='error' (text='{resp_text}'), retrying once")
-                        await asyncio.sleep(3)
-                        continue
                     return data
 
                 text = await resp.text()
@@ -683,13 +697,13 @@ async def process_ai_query(
             f"Usage: Users interact with you by typing @{BOT_USERNAME} followed by their question in any Telegram chat. "
             f"If asked how to use this bot, explain this inline mode usage.\n"
             f"The user may send you: {', '.join(sorted(INPUT_MODALITIES)) if INPUT_MODALITIES else 'text'}.\n"
-            f"CRITICAL \u2014 Formatting constraints (Telegram-only): You must output plain text formatted ONLY with the official Telegram HTML tags "
-            f"that get rendered by Telegram directly: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. "
-            f"Characters like * _ # > are fine in normal text (e.g. 'a * b'), but NEVER use them for formatting: "
-            f"no **bold**, no *italic*, no * bullet points (use plain '-' or '\u2022' instead), no # headings, no > quotes, no backticks (use <code> instead). "
-            f"Telegram prints any Markdown syntax literally instead of rendering it, so it looks broken to users. "
-            f"No tables, blockquotes, or horizontal rules \u2014 Telegram does not support them. "
-            f"Plain text is always safe if you are unsure.\n"
+            f"CRITICAL \u2014 OUTPUT FORMAT: Formatting is ONLY done with these Telegram HTML tags: <b>bold</b>, <i>italic</i>, "
+            f"<code>code</code>, <pre>pre</pre>, <a href='URL'>link</a>. Everything else must be plain text. "
+            f"ABSOLUTELY FORBIDDEN: **bold**, *italic*, _italic_, `code`, # heading, > quote, [text](url), ---, tables, ~~strike~~. "
+            f"Literal * or _ characters are acceptable in plain text (e.g. '2 * 3 = 6') but NEVER wrap words with them. "
+            f"Bullet lists: start each line with '- ' or '\u2022 ' (never '* '). "
+            f"Telegram prints Markdown symbols literally, so any ** or * you write will appear broken to the user. "
+            f"When in doubt, use plain text.\n"
             f"You must provide a real answer \u2014 never give a placeholder or generic response. "
             f"If you do not know the answer, say so honestly. "
             f"Do not ask follow-up questions \u2014 this is a single-turn interaction, not a continuous conversation.\n"
@@ -729,24 +743,23 @@ async def process_ai_query(
         logger.info(f"[ai] mode={mode} tools={tools_enabled} has_media_parts={has_media_parts} media_count={len(media_parts or [])} user_content_type={'list' if has_media_parts else 'str'} query='{query[:100]}'")
         messages = [{"role": "system", "content": make_prompt(0)}, {"role": "user", "content": user_content}]
 
-        async def _req(**kw):
-            try:
-                return await openrouter_request(model=OPENROUTER_MODEL_ID, **kw)
-            except Exception:
+        async def _req(**kw) -> tuple[dict, str]:
+            def _fallback_req():
                 if not OPENROUTER_FALLBACK_MODEL_ID:
-                    raise
-                logger.warning("Primary model failed, trying fallback")
+                    return None
+                logger.warning("Retrying on fallback model")
+                fkw = {**kw, "messages": [dict(m) for m in kw["messages"]]}
                 fallback_modalities = FALLBACK_INPUT_MODALITIES or {"text"}
-                if isinstance(kw["messages"][-1]["content"], list):
+                if isinstance(fkw["messages"][-1]["content"], list):
                     filtered = [
-                        p for p in kw["messages"][-1]["content"]
+                        p for p in fkw["messages"][-1]["content"]
                         if p.get("type") == "text" or _modality_of_part(p) in fallback_modalities
                     ]
                     if len(filtered) == 1:
-                        kw["messages"][-1]["content"] = filtered[0]["text"]
+                        fkw["messages"][-1]["content"] = filtered[0]["text"]
                     else:
-                        kw["messages"][-1]["content"] = filtered
-                sys_msg = kw["messages"][0]
+                        fkw["messages"][-1]["content"] = filtered
+                sys_msg = fkw["messages"][0]
                 if sys_msg["role"] == "system":
                     modalities_str = ", ".join(sorted(fallback_modalities))
                     sys_msg["content"] = re.sub(
@@ -754,9 +767,26 @@ async def process_ai_query(
                         f"The user may send you: {modalities_str}.",
                         sys_msg["content"],
                     )
-                return await openrouter_request(model=OPENROUTER_FALLBACK_MODEL_ID, **kw)
+                return openrouter_request(model=OPENROUTER_FALLBACK_MODEL_ID, **fkw)
 
-        response = await _req(
+            try:
+                resp = await openrouter_request(model=OPENROUTER_MODEL_ID, **kw)
+            except Exception:
+                fallback = _fallback_req()
+                if fallback is not None:
+                    return await fallback, "fallback"
+                raise
+
+            if _response_is_bad(resp):
+                fallback = _fallback_req()
+                if fallback is not None:
+                    return await fallback, "fallback"
+                logger.warning("Model returned error/empty answer, retrying once on same model")
+                resp = await openrouter_request(model=OPENROUTER_MODEL_ID, **kw)
+
+            return resp, "primary"
+
+        response, _ = await _req(
             messages=messages,
             tools=TOOLS_LIST if tools_enabled else None,
             tool_choice="auto" if tools_enabled else None,
@@ -828,7 +858,7 @@ async def process_ai_query(
 
             final_turn = tool_turns + 1 >= max_tool_turns
 
-            response = await _req(
+            response, _ = await _req(
                 messages=messages,
                 tools=None if final_turn else TOOLS_LIST,
                 tool_choice=None if final_turn else "auto",
@@ -849,7 +879,7 @@ async def process_ai_query(
                 "role": "user",
                 "content": "Your previous response was empty. Answer the user's original question directly now based on the information you have.",
             })
-            response = await _req(
+            response, _ = await _req(
                 messages=messages,
                 tools=None,
                 tool_choice=None,
@@ -878,7 +908,7 @@ async def process_ai_query(
     if not answer:
         answer = "Our provider is currently unavailable. Not the developer's fault. Please try again."
 
-    return sanitize_html(answer)
+    return sanitize_html(markdown_to_html(answer))
 
 
 async def process_and_edit(result_id: str, query: str, entry: dict, context):
@@ -955,11 +985,18 @@ async def ask_command(update: Update, context):
         )
         return
 
+    mode = "quick" if "fast" in command else "deep"
+    await _handle_ask(update, context, query, mode)
+
+
+async def _handle_ask(update: Update, context, query: str, mode: str):
+    message = update.message
+    if not message:
+        return
+
     user_id = message.from_user.id
     if message.chat.id not in ALLOWED_GROUP_IDS and user_id not in ALLOWED_USER_IDS:
         return
-
-    mode = "quick" if "fast" in command else "deep"
 
     reply_context = extract_reply_context(message)
     media_parts = await make_content_parts(message, context.bot)
@@ -999,6 +1036,21 @@ async def ask_command(update: Update, context):
             await thinking.edit_text(text=truncated, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Failed to edit answer message: {e}")
+
+
+async def reply_to_bot_handler(update: Update, context):
+    message = update.message
+    if not message or not message.reply_to_message:
+        return
+    reply = message.reply_to_message
+    if not reply.from_user or not reply.from_user.is_bot:
+        return
+    me = await context.bot.get_me()
+    if reply.from_user.id != me.id:
+        return
+    query = message.text or message.caption or ""
+    logger.info(f"[reply_to_bot] from={message.from_user.id} query='{query[:100]}' chat_type={message.chat.type}")
+    await _handle_ask(update, context, query, "quick")
 
 
 CAPTION_COMMAND_RE = re.compile(r"^/(ask_fast|ask_think)(?:@\w+)?(?:[ \t]+(.*))?$", re.IGNORECASE | re.DOTALL)
@@ -1196,6 +1248,10 @@ def main():
     app.add_handler(MessageHandler(
         filters.CAPTION & filters.Regex(r"^/(ask_fast|ask_think)(?:@\w+)?"),
         ask_caption_command,
+    ))
+    app.add_handler(MessageHandler(
+        filters.REPLY & filters.ChatType.GROUPS & ~filters.COMMAND,
+        reply_to_bot_handler,
     ))
     app.add_error_handler(error_handler)
 
